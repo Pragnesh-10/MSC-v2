@@ -513,7 +513,7 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
   }, [eventId, playFeedback, updateDBCounts]);
 
   const checkInSingleMember = async (memberId: string | undefined, memberEmail: string, hashPayload: string) => {
-    if (!memberId || !/^[0-9a-f-]{36}-m-\\d+$/i.test(memberId)) {
+    if (!memberId || !/^[0-9a-f-]{36}-m-\d+$/i.test(memberId)) {
       setScanResult({ outcome: 'invalid', message: 'This cached team member has no valid member identifier. Refresh the attendee cache before checking them in.', timestamp: new Date().toLocaleTimeString(), hashPayload });
       return;
     }
