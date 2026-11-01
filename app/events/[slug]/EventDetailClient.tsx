@@ -466,7 +466,6 @@ export default function EventDetailClient({
   };
 
   const isFree = event.form_requirements?.event_pricing !== 'paid';
-  const selectedTicketPrice = ticketCategories.find((category) => category.id === selectedTicketCategoryId)?.current_price_paise;
 
   return (
     <div style={{ background: 'var(--bg)', minHeight: '100vh', padding: '40px 0 100px 0' }}>
@@ -1202,7 +1201,7 @@ export default function EventDetailClient({
                     ? 'Processing Entry...'
                     : isFree
                     ? 'Confirm Free Registration'
-                    : `Proceed to Razorpay Checkout (${selectedTicketPrice != null ? `₹${(selectedTicketPrice / 100).toFixed(2)}` : `₹${event.form_requirements?.registration_fee || 0}`})`}
+                    : 'Proceed to Razorpay Checkout'}
                 </button>
               </form>
             </>
