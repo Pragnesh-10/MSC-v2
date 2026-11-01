@@ -6,7 +6,7 @@ create table if not exists public.ticket_categories (
   event_id uuid not null references public.events(id) on delete cascade,
   name text not null,
   description text,
-  price_paise integer not null check (price_paise >= 0 and price_paise <= 100000000),
+  price_paise integer not null check (price_paise >= 0 and price_paise <= 10000000),
   early_bird_price_paise integer check (early_bird_price_paise is null or (early_bird_price_paise >= 0 and early_bird_price_paise <= price_paise)),
   early_bird_starts_at timestamptz,
   early_bird_ends_at timestamptz,
@@ -174,7 +174,141 @@ begin
     ) then
       return jsonb_build_object('success', false, 'error', 'Select a ticket category to continue.');
     end if;
-    v_base_amount := coalesce((v_event.form_requirements->>'registration_fee')::integer, 0) * 100;
+    v_base_amount := case
+      when coalesce(v_event.form_requirements->>'registration_fee', '') ~ '^[0-9]+
+  end if;
+
+  if v_base_amount <= 0 then
+    return jsonb_build_object('success', false, 'error', 'A valid paid ticket price is not configured.');
+  end if;
+
+  if v_code <> '' then
+    select * into v_promo
+    from public.promo_codes
+    where event_id = p_event_id and upper(code) = v_code and is_active = true
+    for update;
+
+    if not found then
+      return jsonb_build_object('success', false, 'error', 'Promo code is invalid or inactive.');
+    end if;
+    if v_promo.starts_at is not null and v_now < v_promo.starts_at then
+      return jsonb_build_object('success', false, 'error', 'Promo code is not active yet.');
+    end if;
+    if v_promo.ends_at is not null and v_now >= v_promo.ends_at then
+      return jsonb_build_object('success', false, 'error', 'Promo code has expired.');
+    end if;
+    if v_base_amount < v_promo.min_order_paise then
+      return jsonb_build_object('success', false, 'error', 'Order does not meet the minimum amount for this promo code.');
+    end if;
+
+    select count(*) into v_used
+    from public.promo_code_reservations
+    where promo_code_id = v_promo.id
+      and (status = 'redeemed' or (status = 'reserved' and expires_at > v_now))
+      and registration_id <> p_registration_id;
+
+    if v_promo.max_redemptions is not null and v_used >= v_promo.max_redemptions then
+      return jsonb_build_object('success', false, 'error', 'Promo code redemption limit has been reached.');
+    end if;
+
+    v_discount := case
+      when v_promo.discount_type = 'percentage'
+        then floor(v_base_amount * v_promo.discount_value / 100.0)::integer
+      else v_promo.discount_value
+    end;
+    if v_promo.max_discount_paise is not null then
+      v_discount := least(v_discount, v_promo.max_discount_paise);
+    end if;
+    v_discount := least(v_discount, v_base_amount);
+    v_promo_id := v_promo.id;
+    v_promo_code := v_promo.code;
+  end if;
+
+  v_final_amount := v_base_amount - v_discount;
+  if v_final_amount <= 0 then
+    return jsonb_build_object('success', false, 'error', 'Discount must leave a positive payable amount.');
+  end if;
+
+  insert into public.ticket_category_reservations(registration_id, ticket_category_id, status, expires_at, updated_at)
+  select p_registration_id, v_category_id, 'reserved', v_now + interval '15 minutes', v_now
+  where v_category_id is not null
+  on conflict (registration_id) do update
+    set ticket_category_id = excluded.ticket_category_id,
+        status = 'reserved',
+        expires_at = excluded.expires_at,
+        updated_at = excluded.updated_at;
+
+  if v_code <> '' then
+    insert into public.promo_code_reservations(registration_id, promo_code_id, status, expires_at, updated_at)
+    values (p_registration_id, v_promo_id, 'reserved', v_now + interval '15 minutes', v_now)
+    on conflict (registration_id) do update
+      set promo_code_id = excluded.promo_code_id,
+          status = 'reserved',
+          expires_at = excluded.expires_at,
+          updated_at = excluded.updated_at;
+  else
+    delete from public.promo_code_reservations
+    where registration_id = p_registration_id and status = 'reserved';
+  end if;
+
+  update public.registrations
+  set form_data = coalesce(form_data, '{}'::jsonb) || jsonb_build_object(
+    'ticket_category_id', p_ticket_category_id,
+    'ticket_category_name', v_category_name,
+    'base_amount_paise', v_base_amount,
+    'promo_code_id', v_promo_id,
+    'promo_code', v_promo_code,
+    'discount_amount_paise', v_discount,
+    'final_amount_paise', v_final_amount,
+    'pricing_snapshot_at', v_now
+  ),
+  updated_at = v_now
+  where id = p_registration_id;
+
+  return jsonb_build_object(
+    'success', true,
+    'category_name', v_category_name,
+    'base_amount_paise', v_base_amount,
+    'discount_amount_paise', v_discount,
+    'final_amount_paise', v_final_amount,
+    'promo_code', v_promo_code
+  );
+end;
+$$;
+
+revoke all on function public.reserve_ticket_and_promo(uuid, uuid, uuid, text) from public, anon, authenticated;
+grant execute on function public.reserve_ticket_and_promo(uuid, uuid, uuid, text) to service_role;
+
+create or replace function public.mark_ticket_and_promo_redeemed()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if new.status = 'captured' and new.registration_id is not null then
+    update public.ticket_category_reservations
+    set status = 'redeemed', expires_at = null, updated_at = now()
+    where registration_id = new.registration_id;
+
+    update public.promo_code_reservations
+    set status = 'redeemed', expires_at = null, updated_at = now()
+    where registration_id = new.registration_id;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists payments_mark_ticket_promo_redeemed on public.payments;
+create trigger payments_mark_ticket_promo_redeemed
+after insert on public.payments
+for each row execute function public.mark_ticket_and_promo_redeemed();
+
+notify pgrst, 'reload schema';
+
+        then (v_event.form_requirements->>'registration_fee')::integer * 100
+      else 0
+    end;
   end if;
 
   if v_base_amount <= 0 then
