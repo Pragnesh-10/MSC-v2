@@ -513,7 +513,46 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
   }, [eventId, playFeedback, updateDBCounts]);
 
   const checkInSingleMember = async (memberId: string | undefined, memberEmail: string, hashPayload: string) => {
+    if (!memberId || !/^[0-9a-f-]{36}-m-\\d+$/i.test(memberId)) {
+      setScanResult({ outcome: 'invalid', message: 'This cached team member has no valid member identifier. Refresh the attendee cache before checking them in.', timestamp: new Date().toLocaleTimeString(), hashPayload });
+      return;
+    }
     try {
+      if (!navigator.onLine) {
+        const db = await openDB();
+        const tx = db.transaction(['cached_registrations', 'offline_queue'], 'readwrite');
+        const cacheStore = tx.objectStore('cached_registrations');
+        const cached = await new Promise<any>((resolve, reject) => {
+          const request = cacheStore.get([eventId, hashPayload]);
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        if (!cached || cached.event_id !== eventId) throw new Error('Team is missing from this event cache.');
+        const index = Number(memberId.split('-m-').pop());
+        if (!Number.isInteger(index) || index < 0 || index >= (cached.team_members || []).length) throw new Error('Member is not present in the cached roster.');
+        cached.team_members[index] = { ...cached.team_members[index], checked_in: true };
+        cacheStore.put(cached);
+        tx.objectStore('offline_queue').add({
+          event_id: eventId,
+          hash_payload: hashPayload,
+          member_id: memberId,
+          team_mode: 'member',
+          timestamp: new Date().toISOString(),
+        });
+        await new Promise<void>((resolve, reject) => {
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error);
+        });
+        setTeamModalData((prev) => prev ? {
+          ...prev,
+          teamMembers: (prev.teamMembers || []).map((m: any) => m.id === memberId ? { ...m, checked_in: true } : m),
+        } : null);
+        setScanResult({ outcome: 'success', message: 'Member check-in queued offline. Server confirmation is pending.', timestamp: new Date().toLocaleTimeString(), offline: true, hashPayload });
+        await updateDBCounts();
+        playFeedback('success');
+        return;
+      }
       const res = await fetch('/api/admin/checkin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
