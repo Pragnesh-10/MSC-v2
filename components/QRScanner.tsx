@@ -167,7 +167,7 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
       const data = await res.json();
       if (!Array.isArray(data.registrations)) throw new Error('Registration response was incomplete.');
       const records: any[] = data.registrations;
-      if (data.next_cursor || data.has_more) throw new Error('Registration pagination is required before this cache is complete.');
+      if (typeof data.total_count === 'number' && data.total_count > records.length) throw new Error('Only part of this event roster was returned. Offline caching is disabled until pagination is implemented.');
 
       const db = await openDB();
       const tx = db.transaction('cached_registrations', 'readwrite');
