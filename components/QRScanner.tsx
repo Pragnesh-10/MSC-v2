@@ -53,7 +53,8 @@ function openDB(): Promise<IDBDatabase> {
       const db = request.result;
       // Rebuild the disposable cache so legacy global keys cannot cross event boundaries.
       if (db.objectStoreNames.contains('cached_registrations')) db.deleteObjectStore('cached_registrations');
-      db.createObjectStore('cached_registrations', { keyPath: ['event_id', 'hash_payload'] });
+      const cacheStore = db.createObjectStore('cached_registrations', { keyPath: ['event_id', 'hash_payload'] });
+      cacheStore.createIndex('event_id', 'event_id', { unique: false });
       if (!db.objectStoreNames.contains('offline_queue')) {
         db.createObjectStore('offline_queue', { keyPath: 'id', autoIncrement: true });
       }
@@ -172,8 +173,17 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
       const db = await openDB();
       const tx = db.transaction('cached_registrations', 'readwrite');
       const store = tx.objectStore('cached_registrations');
-      records.forEach((rec) => {
-        store.put({
+      // Replace this event's snapshot only after a complete server response.
+      const cursorRequest = store.index('event_id').openCursor(IDBKeyRange.only(eventId));
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (cursor) {
+          cursor.delete();
+          cursor.continue();
+          return;
+        }
+        records.forEach((rec) => {
+          store.put({
           hash_payload: rec.hash_payload || rec.id,
           event_id: eventId,
           lead_name: rec.lead_name || rec.name,
@@ -189,10 +199,15 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
           })),
           checked_in: rec.checked_in || false,
           checked_in_at: rec.checked_in_at || null,
+          });
         });
-      });
+      };
 
-      await new Promise((resolve) => (tx.oncomplete = resolve));
+      await new Promise<void>((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
       await updateDBCounts();
     } catch (err) {
       console.error('Failed to cache registrations:', err);
