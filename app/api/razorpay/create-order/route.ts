@@ -61,12 +61,6 @@ export async function POST(req: Request) {
     if (eventError) throw eventError;
     if (!event) return NextResponse.json({ error: 'Event not found.' }, { status: 404 });
 
-    const fee = Number(event.form_requirements?.registration_fee);
-    if (!Number.isSafeInteger(fee) || fee <= 0 || !Number.isSafeInteger(fee * 100)) {
-      return NextResponse.json({ error: 'A valid registration fee is not configured for this event.' }, { status: 409 });
-    }
-    const amountInPaise = fee * 100;
-
     // Reuse an existing unexpired order. This makes repeated checkout requests idempotent.
     const { data: previousOrder, error: previousOrderError } = await supabase
       .from('payment_orders')
@@ -95,6 +89,28 @@ export async function POST(req: Request) {
         .eq('id', previousOrder.id);
       if (error) throw error;
     }
+
+    const ticketCategoryId = body.ticket_category_id ?? null;
+    if (ticketCategoryId !== null && !isValidUUID(ticketCategoryId as string)) {
+      return NextResponse.json({ error: 'Invalid ticket category.' }, { status: 400 });
+    }
+    const promoCode = typeof body.promo_code === 'string' ? body.promo_code.trim().slice(0, 64) : '';
+
+    const { data: pricing, error: pricingError } = await supabase.rpc('reserve_ticket_and_promo', {
+      p_registration_id: registration.id,
+      p_event_id: registration.event_id,
+      p_ticket_category_id: ticketCategoryId,
+      p_promo_code: promoCode,
+    });
+
+    if (pricingError) throw pricingError;
+    if (!pricing || pricing.success !== true || !Number.isSafeInteger(pricing.final_amount_paise) || pricing.final_amount_paise <= 0) {
+      return NextResponse.json(
+        { error: pricing?.error || 'Ticket pricing could not be validated.' },
+        { status: 409 }
+      );
+    }
+    const amountInPaise = pricing.final_amount_paise as number;
 
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
     const { data: orderRecord, error: insertError } = await supabase
