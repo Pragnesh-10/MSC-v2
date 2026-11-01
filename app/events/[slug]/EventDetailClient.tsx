@@ -312,6 +312,9 @@ export default function EventDetailClient({
             }),
           });
           const orderData = await orderRes.json();
+          if (!orderRes.ok || !orderData.success || !orderData.order_id) {
+            throw new Error(orderData.error || 'Unable to prepare your payment. Please try again.');
+          }
 
           const options = {
             key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || 'rzp_test_placeholder',
@@ -463,6 +466,7 @@ export default function EventDetailClient({
   };
 
   const isFree = event.form_requirements?.event_pricing !== 'paid';
+  const selectedTicketPrice = ticketCategories.find((category) => category.id === selectedTicketCategoryId)?.current_price_paise;
 
   return (
     <div style={{ background: 'var(--bg)', minHeight: '100vh', padding: '40px 0 100px 0' }}>
@@ -1198,7 +1202,7 @@ export default function EventDetailClient({
                     ? 'Processing Entry...'
                     : isFree
                     ? 'Confirm Free Registration'
-                    : `Proceed to Razorpay Checkout (₹${event.form_requirements?.registration_fee || 0})`}
+                    : `Proceed to Razorpay Checkout (${selectedTicketPrice != null ? `₹${(selectedTicketPrice / 100).toFixed(2)}` : `₹${event.form_requirements?.registration_fee || 0}`})`}
                 </button>
               </form>
             </>
