@@ -40,7 +40,7 @@ interface QRScannerProps {
 
 // Simple IndexedDB Helper
 const DB_NAME = 'msc_scanner_db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -51,9 +51,9 @@ function openDB(): Promise<IDBDatabase> {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
-      if (!db.objectStoreNames.contains('cached_registrations')) {
-        db.createObjectStore('cached_registrations', { keyPath: 'hash_payload' });
-      }
+      // Rebuild the disposable cache so legacy global keys cannot cross event boundaries.
+      if (db.objectStoreNames.contains('cached_registrations')) db.deleteObjectStore('cached_registrations');
+      db.createObjectStore('cached_registrations', { keyPath: ['event_id', 'hash_payload'] });
       if (!db.objectStoreNames.contains('offline_queue')) {
         db.createObjectStore('offline_queue', { keyPath: 'id', autoIncrement: true });
       }
@@ -162,14 +162,12 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
   const cacheRegistrations = async () => {
     setCachingInProgress(true);
     try {
-      const res = await fetch(`/api/admin/registrations?event_id=${eventId}&limit=1000`);
-      let records: any[] = [];
-      if (res.ok) {
-        const data = await res.json();
-        records = data.registrations || [];
-      }
-
-      // Cache real records without injecting mock data
+      const res = await fetch(`/api/admin/registrations?event_id=${encodeURIComponent(eventId)}&limit=1000`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`Could not download registrations (HTTP ${res.status}).`);
+      const data = await res.json();
+      if (!Array.isArray(data.registrations)) throw new Error('Registration response was incomplete.');
+      const records: any[] = data.registrations;
+      if (data.next_cursor || data.has_more) throw new Error('Registration pagination is required before this cache is complete.');
 
       const db = await openDB();
       const tx = db.transaction('cached_registrations', 'readwrite');
@@ -177,7 +175,7 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
       records.forEach((rec) => {
         store.put({
           hash_payload: rec.hash_payload || rec.id,
-          event_id: rec.event_id || eventId,
+          event_id: eventId,
           lead_name: rec.lead_name || rec.name,
           reg_number: rec.reg_number || rec.registration_number,
           team_name: rec.team_name || '',
@@ -217,18 +215,26 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
 
       for (const item of items) {
         try {
-          await fetch('/api/admin/checkin', {
+          const res = await fetch('/api/admin/checkin', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               event_id: item.event_id,
               hash_payload: item.hash_payload,
-              checkin_type: item.checkin_type,
+              team_mode: item.team_mode,
+              member_id: item.member_id,
             }),
           });
-          // Delete from queue
-          const deleteTx = db.transaction('offline_queue', 'readwrite');
-          deleteTx.objectStore('offline_queue').delete(item.id);
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && (data.success || data.already_checked_in)) {
+            const deleteTx = db.transaction('offline_queue', 'readwrite');
+            deleteTx.objectStore('offline_queue').delete(item.id);
+            await new Promise<void>((resolve, reject) => {
+              deleteTx.oncomplete = () => resolve();
+              deleteTx.onerror = () => reject(deleteTx.error);
+              deleteTx.onabort = () => reject(deleteTx.error);
+            });
+          }
         } catch {
           // Keep in queue for next sync
         }
@@ -374,17 +380,17 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
       const db = await openDB();
       const tx = db.transaction('cached_registrations', 'readonly');
       const store = tx.objectStore('cached_registrations');
-      const req = store.get(hash);
+      const req = store.get([eventId, hash]);
 
       const cachedRec = await new Promise<any>((resolve) => {
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => resolve(null);
       });
 
-      if (!cachedRec) {
+      if (!cachedRec || cachedRec.event_id !== eventId) {
         result = {
           outcome: 'invalid',
-          message: 'Ticket not found in local cache (Offline Mode).',
+          message: 'Ticket not found in this event’s local cache (Offline Mode).',
           timestamp: new Date().toLocaleTimeString(),
           offline: true,
           hashPayload: hash,
@@ -411,7 +417,7 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
         writeTx.objectStore('offline_queue').add({
           event_id: eventId,
           hash_payload: hash,
-          checkin_type: teamMode || 'standard',
+          team_mode: teamMode || 'lead_only',
           timestamp: new Date().toISOString(),
         });
 
@@ -459,12 +465,11 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
         body: JSON.stringify({
           event_id: eventId,
           hash_payload: hashPayload,
-          member_id: memberId && !memberId.includes('-m-') ? memberId : undefined,
-          member_email: memberEmail,
+          member_id: memberId,
         }),
       });
       const data = await res.json();
-      if (data.success) {
+      if (res.ok && data.success) {
         setTeamModalData((prev) => {
           if (!prev) return null;
           const updated = (prev.teamMembers || []).map((m: any) => {
@@ -496,10 +501,24 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
     }
 
     let hash = decodedText.trim();
-    if (hash.includes('/admin/checkin/')) {
-      hash = hash.split('/admin/checkin/')[1].split('?')[0];
-    } else if (hash.includes('/ticket/')) {
-      hash = hash.split('/ticket/')[1].split('?')[0];
+    try {
+      const parsed = new URL(decodedText);
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      const checkinIndex = parts.indexOf('checkin');
+      const ticketIndex = parts.indexOf('ticket');
+      if (parts.includes('admin') && checkinIndex >= 0 && parts[checkinIndex + 1]) {
+        hash = decodeURIComponent(parts[checkinIndex + 1]);
+      } else if (ticketIndex >= 0 && parts[ticketIndex + 1]) {
+        hash = decodeURIComponent(parts[ticketIndex + 1]);
+      } else if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        hash = '';
+      }
+    } catch {
+      // Plain identifiers remain supported.
+    }
+    if (!hash || hash.length > 512) {
+      setScanResult({ outcome: 'invalid', message: 'QR code format is not recognized.', timestamp: new Date().toLocaleTimeString() });
+      return;
     }
 
     await processCheckin(hash);
