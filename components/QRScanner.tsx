@@ -315,6 +315,44 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
   const processCheckin = useCallback(async (hash: string, teamMode?: 'all' | 'lead_only') => {
     let result: ScanResult;
 
+    // Resolve team details without changing attendance. The operator must choose
+    // a team action before the first check-in mutation is sent.
+    if (navigator.onLine && !teamMode) {
+      try {
+        const previewRes = await fetch('/api/admin/checkin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ event_id: eventId, hash_payload: hash, preview: true }),
+        });
+        const preview = await previewRes.json();
+        if (!previewRes.ok || !preview.success) {
+          result = { outcome: 'invalid', message: preview.error || 'Ticket could not be verified.', timestamp: new Date().toLocaleTimeString(), hashPayload: hash };
+          setScanResult(result);
+          setRecentScans((prev) => [result, ...prev.slice(0, 9)]);
+          playFeedback('invalid');
+          return;
+        }
+        if (preview.is_team && (preview.team_members?.length || 0) > 1) {
+          result = {
+            outcome: 'idle',
+            message: 'Team verified. Select who should be checked in.',
+            name: preview.participant_name || 'Participant',
+            regNum: preview.registration_number,
+            teamName: preview.team_name,
+            isTeam: true,
+            teamMembers: preview.team_members || [],
+            timestamp: new Date().toLocaleTimeString(),
+            hashPayload: hash,
+          };
+          setScanResult(result);
+          setTeamModalData(result);
+          return;
+        }
+      } catch {
+        // Network failure falls through to the event-scoped offline cache.
+      }
+    }
+
     // 1. Try Online API if network is available
     if (navigator.onLine) {
       try {
@@ -407,7 +445,24 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
           hashPayload: hash,
         };
       } else {
-        // Mark locally checked in
+        if (Boolean(cachedRec.team_name) && (cachedRec.team_members?.length || 0) > 1 && !teamMode) {
+          result = {
+            outcome: 'idle',
+            message: 'Team found in offline cache. Select who should be checked in.',
+            name: cachedRec.lead_name,
+            regNum: cachedRec.reg_number,
+            teamName: cachedRec.team_name,
+            isTeam: true,
+            teamMembers: cachedRec.team_members,
+            timestamp: new Date().toLocaleTimeString(),
+            offline: true,
+            hashPayload: hash,
+          };
+          setScanResult(result);
+          setTeamModalData(result);
+          return;
+        }
+        // Mark locally checked in only after the operator chooses a team mode.
         const writeTx = db.transaction(['cached_registrations', 'offline_queue'], 'readwrite');
         cachedRec.checked_in = true;
         cachedRec.checked_in_at = new Date().toISOString();
