@@ -145,6 +145,7 @@ export default function EventDetailClient({
   const [noRefundAccepted, setNoRefundAccepted] = useState(false);
   const [ticketCategories, setTicketCategories] = useState<any[]>([]);
   const [ticketCategoriesLoading, setTicketCategoriesLoading] = useState(false);
+  const [ticketCategoriesError, setTicketCategoriesError] = useState(false);
   const [selectedTicketCategoryId, setSelectedTicketCategoryId] = useState('');
   const [promoCode, setPromoCode] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -159,13 +160,17 @@ export default function EventDetailClient({
         const data = await response.json();
         if (!response.ok || !data.success) throw new Error(data.error || 'Unable to load ticket categories.');
         if (active) {
+          setTicketCategoriesError(false);
           setTicketCategories(data.categories || []);
           if (data.categories?.length === 1) setSelectedTicketCategoryId(data.categories[0].id);
         }
       })
       .catch((error) => {
         console.error('[Ticket categories]:', error);
-        if (active) setErrorMsg('Unable to load ticket options. Please refresh and try again.');
+        if (active) {
+          setTicketCategoriesError(true);
+          setErrorMsg('Unable to load ticket options. Please refresh and try again.');
+        }
       })
       .finally(() => { if (active) setTicketCategoriesLoading(false); });
     return () => { active = false; };
@@ -217,6 +222,10 @@ export default function EventDetailClient({
     e.preventDefault();
     if (isRegistrationClosed) {
       setErrorMsg('Registrations are closed for this event.');
+      return;
+    }
+    if (event.form_requirements?.event_pricing === 'paid' && (ticketCategoriesLoading || ticketCategoriesError)) {
+      setErrorMsg('Ticket options are still loading or could not be loaded. Please refresh and try again.');
       return;
     }
     if (event.form_requirements?.event_pricing === 'paid' && ticketCategories.length > 0 && !selectedTicketCategoryId) {
