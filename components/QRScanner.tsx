@@ -179,7 +179,14 @@ export default function QRScanner({ eventId, eventTitle }: QRScannerProps) {
           lead_name: rec.lead_name || rec.name,
           reg_number: rec.reg_number || rec.registration_number,
           team_name: rec.team_name || '',
-          team_members: rec.team_members || [],
+          team_members: (rec.team_members || []).map((member: any, index: number) => ({
+            ...member,
+            id: `${rec.id}-m-${index}`,
+            name: member.fullName || member.name || 'Team member',
+            email: member.email || '',
+            reg_number: member.regNum || member.reg_number || member.registration_number || '',
+            checked_in: Boolean(member.checked_in),
+          })),
           checked_in: rec.checked_in || false,
           checked_in_at: rec.checked_in_at || null,
         });
