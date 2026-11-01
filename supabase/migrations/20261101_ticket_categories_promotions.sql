@@ -114,6 +114,9 @@ declare
   v_used integer;
   v_existing_promo uuid;
   v_category_name text := 'General Admission';
+  v_category_id uuid;
+  v_promo_id uuid;
+  v_promo_code text;
 begin
   select * into v_registration
   from public.registrations
@@ -163,6 +166,7 @@ begin
       else v_category.price_paise
     end;
     v_category_name := v_category.name;
+    v_category_id := v_category.id;
   else
     if exists (
       select 1 from public.ticket_categories
@@ -215,6 +219,8 @@ begin
       v_discount := least(v_discount, v_promo.max_discount_paise);
     end if;
     v_discount := least(v_discount, v_base_amount);
+    v_promo_id := v_promo.id;
+    v_promo_code := v_promo.code;
   end if;
 
   v_final_amount := v_base_amount - v_discount;
@@ -223,8 +229,8 @@ begin
   end if;
 
   insert into public.ticket_category_reservations(registration_id, ticket_category_id, status, expires_at, updated_at)
-  select p_registration_id, v_category.id, 'reserved', v_now + interval '15 minutes', v_now
-  where p_ticket_category_id is not null
+  select p_registration_id, v_category_id, 'reserved', v_now + interval '15 minutes', v_now
+  where v_category_id is not null
   on conflict (registration_id) do update
     set ticket_category_id = excluded.ticket_category_id,
         status = 'reserved',
@@ -233,7 +239,7 @@ begin
 
   if v_code <> '' then
     insert into public.promo_code_reservations(registration_id, promo_code_id, status, expires_at, updated_at)
-    values (p_registration_id, v_promo.id, 'reserved', v_now + interval '15 minutes', v_now)
+    values (p_registration_id, v_promo_id, 'reserved', v_now + interval '15 minutes', v_now)
     on conflict (registration_id) do update
       set promo_code_id = excluded.promo_code_id,
           status = 'reserved',
@@ -249,8 +255,8 @@ begin
     'ticket_category_id', p_ticket_category_id,
     'ticket_category_name', v_category_name,
     'base_amount_paise', v_base_amount,
-    'promo_code_id', case when v_code <> '' then v_promo.id else null end,
-    'promo_code', case when v_code <> '' then v_promo.code else null end,
+    'promo_code_id', v_promo_id,
+    'promo_code', v_promo_code,
     'discount_amount_paise', v_discount,
     'final_amount_paise', v_final_amount,
     'pricing_snapshot_at', v_now
@@ -264,7 +270,7 @@ begin
     'base_amount_paise', v_base_amount,
     'discount_amount_paise', v_discount,
     'final_amount_paise', v_final_amount,
-    'promo_code', case when v_code <> '' then v_promo.code else null end
+    'promo_code', v_promo_code
   );
 end;
 $$;
